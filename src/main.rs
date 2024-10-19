@@ -1,44 +1,59 @@
-use std::{
-    collections::HashMap,
-    env,
-    ffi::OsString,
-    fs::File,
-    path::Path,
-    sync::{Arc, LazyLock},
-    thread::sleep,
-    time::Duration,
-};
-
-use axum::{
-    extract::{self, Request},
-    http::StatusCode,
-    routing::{get, post},
-    Json, Router,
-};
-
-use chrono::{DateTime, Utc};
-use ffmpeg_next::{codec, encoder, format, log, media, Rational};
-use rand::random;
-use regex::Regex;
-use serde_derive::{Deserialize, Serialize};
-use tempfile::NamedTempFile;
-use thiserror::Error;
-use tokio::sync::{
-    mpsc::{self, Receiver, Sender},
-    Mutex,
-};
-use tracing::{debug, info, instrument, level_filters::LevelFilter, trace};
-use tracing_subscriber::{filter::EnvFilter, util::SubscriberInitExt};
-use tracing_subscriber::{fmt, layer::SubscriberExt};
+#![feature(try_blocks)]
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_JOB_QUEUE: usize = 64;
 
 static REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^.+/videos").unwrap());
 
-#[derive(Error, Debug)]
-pub enum OptimizationServerError {}
+use std::{
+    collections::HashMap,
+    env,
+    ffi::CString,
+    os::unix::fs::MetadataExt,
+    path::Path,
+    sync::{Arc, LazyLock},
+    thread::sleep,
+    time::Duration,
+};
 
+use thiserror::Error;
+
+use axum::{
+    body::Body,
+    extract::{self, Request},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+
+use chrono::{DateTime, Utc};
+use rand::random;
+use regex::Regex;
+use serde_derive::{Deserialize, Serialize};
+
+use tokio::sync::{
+    mpsc::{self, Receiver, Sender},
+    Mutex,
+};
+use tower_http::services::ServeFile;
+
+pub mod video;
+use crate::video::*;
+
+use tracing::{debug, info, trace};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
+#[derive(Error, Debug)]
+pub enum OptimizationServerError {
+    #[error("Failed to write to end file")]
+    FailedWrite,
+    #[error("Failed to get JOB_ID")]
+    GetJob,
+}
+
+// Struct that is used to request a job be added to the system
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct JobRecieved {
     pub url: String,
@@ -48,22 +63,24 @@ pub struct JobRecieved {
     pub item: String,
 }
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq, PartialOrd, Ord)]
+// Struct that is built when a job is requested, it takes in [["crate::JobRecieved"]] when building
+// and adds timestamp and other needed variables.
+#[derive(Debug, Clone, Hash, Eq, PartialEq, PartialOrd, Ord, Deserialize, Serialize)]
 pub struct Job {
     pub id: u32,
     pub status: JobStatus,
     progress: u32,
-    output_path: OsString,
+    output_path: String,
     input_url: String,
     device_id: String,
     timestamp: DateTime<Utc>,
     file_extension: String,
-    size: u32,
+    size: u64,
     item: String,
-    // speed: u32 (Was in original implementation??? Ig to set ffmpeg speed maybe?)
 }
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq, PartialOrd, Ord)]
+// Struct used to define what the status of a job is
+#[derive(Debug, Clone, Hash, Eq, PartialEq, PartialOrd, Ord, Copy, Deserialize, Serialize)]
 pub enum JobStatus {
     Queued,
     Optimizing,
@@ -75,11 +92,11 @@ pub enum JobStatus {
 #[tokio::main]
 async fn main() {
     // Enable logging with the RUST_LOG environment variabe
-    let filter = EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
+    let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
         .from_env_lossy();
     tracing_subscriber::registry()
-        .with(fmt::layer())
+        .with(tracing_subscriber::fmt::layer())
         .with(filter)
         .init();
 
@@ -93,26 +110,40 @@ async fn main() {
     let recieve_channel_safe = Arc::new(Mutex::new(recieve_channel));
 
     let job_queue_arc: Arc<Mutex<HashMap<u32, Mutex<Job>>>> = Arc::new(Mutex::new(HashMap::new()));
-
     let cloned = Arc::clone(&job_queue_arc);
+    let cloned2 = Arc::clone(&job_queue_arc);
+    let cloned3 = Arc::clone(&job_queue_arc);
+    let cloned4 = Arc::clone(&job_queue_arc);
+
     tokio::spawn(async move { handle_jobs(cloned, Arc::clone(&recieve_channel_safe)).await });
 
-    let cloned = Arc::clone(&job_queue_arc);
-    let application_router: Router = Router::new().route("/info", get(info)).route(
-        "/add-job",
-        post(move |body: Json<JobRecieved>| add_job(body, cloned, send_channel)),
-    );
+    let application_router: Router = Router::new()
+        .route("/info", get(info))
+        .route(
+            "/add-job",
+            post(move |body: Json<JobRecieved>| add_job(body, cloned2, send_channel)),
+        )
+        .route(
+            "/get-job",
+            get(move |request: Request| get_job(request, cloned3)),
+        )
+        .route(
+            "/get-file",
+            get(move |request: Request| get_file(request, cloned4)),
+        );
 
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", ip, port))
         .await
-        .unwrap();
+        .expect("TCPListener failed to bind, is it already in use?");
 
     info!(
         "Started the Optimization Server Version: {}, bound to {}:{}",
         VERSION, ip, port
     );
 
-    axum::serve(listener, application_router).await.unwrap();
+    axum::serve(listener, application_router)
+        .await
+        .expect("Server Died, have fun :D");
 }
 
 async fn info(request: Request) -> String {
@@ -130,12 +161,61 @@ async fn info(request: Request) -> String {
     format!("{}\n{}", version_section, request_section)
 }
 
-#[instrument]
+async fn get_job(
+    body: Request,
+    queue: Arc<Mutex<HashMap<u32, Mutex<Job>>>>,
+) -> Result<Json<Job>, StatusCode> {
+    let value: anyhow::Result<u32> = try {
+        body.headers()
+            .get("job_id")
+            .ok_or(OptimizationServerError::GetJob)?
+            .to_str()?
+            .parse()?
+    };
+
+    if let Ok(o) = value {
+        match queue.lock().await.get(&o) {
+            Some(o) => Ok(Json(o.lock().await.clone())),
+            None => Err(StatusCode::BAD_REQUEST),
+        }
+    } else {
+        Err(StatusCode::BAD_REQUEST)
+    }
+}
+
+async fn get_file(body: Request, queue: Arc<Mutex<HashMap<u32, Mutex<Job>>>>) -> impl IntoResponse {
+    let value: anyhow::Result<u32> = try {
+        body.headers()
+            .get("job_id")
+            .ok_or(OptimizationServerError::GetJob)?
+            .to_str()?
+            .parse()?
+    };
+
+    if let Ok(o) = value {
+        match queue.lock().await.get(&o) {
+            Some(o) => {
+                let job = o.lock().await.clone();
+
+                let request = Request::new(Body::empty());
+
+                Ok(ServeFile::new(job.output_path)
+                    .try_call(request)
+                    .await
+                    .unwrap())
+            }
+            None => Err(StatusCode::NOT_FOUND),
+        }
+    } else {
+        Err(StatusCode::BAD_REQUEST)
+    }
+}
+
 async fn add_job(
     extract::Json(body): extract::Json<JobRecieved>,
     queue: Arc<Mutex<HashMap<u32, Mutex<Job>>>>,
     send_channel: Sender<u32>,
-) -> StatusCode {
+) -> Response {
     debug!("Optimization request for: {:?}", body.url);
 
     let jellyfin_url = env::var("JELLYFIN_URL");
@@ -152,7 +232,7 @@ async fn add_job(
         id,
         status: JobStatus::Queued,
         progress: 0,
-        output_path: format!("files/{}.mp4", id).into(),
+        output_path: format!("files/{}.mp4", id),
         device_id: body.device_id,
         file_extension: String::from("mp4"),
         input_url: url,
@@ -166,12 +246,18 @@ async fn add_job(
     let sent = send_channel.send(id).await;
 
     match sent {
-        Ok(_) => StatusCode::CREATED,
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        Ok(_) => Response::builder()
+            .status(StatusCode::CREATED)
+            .header("JOB_ID", id)
+            .body(Body::from("Job Created"))
+            .unwrap(),
+        Err(_) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from("Error when creating job"))
+            .unwrap(),
     }
 }
 
-#[instrument]
 async fn handle_jobs(
     queue: Arc<Mutex<HashMap<u32, Mutex<Job>>>>,
     recieve_channel: Arc<Mutex<Receiver<u32>>>,
@@ -189,54 +275,22 @@ async fn handle_jobs(
 
             println!("Job Info is: {:?}", info);
 
-            let input_file = Path::new(&info.input_url);
-            let output_file = Path::new(&info.output_path);
+            let input_file = CString::new(info.input_url.clone()).unwrap();
+            let output_file = CString::new(info.output_path.clone()).unwrap();
 
-            ffmpeg_next::init().unwrap();
-
-            let mut ictx = format::input(input_file).unwrap();
-
-            let mut octx = format::output_as(output_file, &info.file_extension).unwrap();
-
-            let mut stream_mapping = vec![0; ictx.nb_streams() as _];
-            let mut ist_time_bases = vec![Rational(0, 1); ictx.nb_streams() as _];
-            let mut ost_index = 0;
-            for (ist_index, ist) in ictx.streams().enumerate() {
-                let ist_medium = ist.parameters().medium();
-                if ist_medium != media::Type::Audio
-                    && ist_medium != media::Type::Video
-                    && ist_medium != media::Type::Subtitle
-                {
-                    stream_mapping[ist_index] = -1;
-                    continue;
+            match remux(&input_file, &output_file) {
+                Ok(_) => {
+                    let entry_lock = queue.lock().await;
+                    let entry = entry_lock.get(&j).unwrap();
+                    entry.lock().await.status = JobStatus::Completed;
+                    entry.lock().await.size =
+                        Path::new(&info.output_path).metadata().unwrap().size();
                 }
-                stream_mapping[ist_index] = ost_index;
-                ist_time_bases[ist_index] = ist.time_base();
-                ost_index += 1;
-                let mut ost = octx.add_stream(encoder::find(codec::Id::MPEG4)).unwrap();
-                ost.set_parameters(ist.parameters());
-                // We need to set codec_tag to 0 lest we run into incompatible codec tag
-                // issues when muxing into a different container format. Unfortunately
-                // there's no high level API to do this (yet).
-                unsafe {
-                    (*ost.parameters().as_mut_ptr()).codec_tag = 0;
+                Err(_) => {
+                    let entry_lock = queue.lock().await;
+                    let entry = entry_lock.get(&j).unwrap();
+                    entry.lock().await.status = JobStatus::Failed;
                 }
-            }
-
-            octx.set_metadata(ictx.metadata().to_owned());
-            octx.write_header().unwrap();
-
-            for (stream, mut packet) in ictx.packets() {
-                let ist_index = stream.index();
-                let ost_index = stream_mapping[ist_index];
-                if ost_index < 0 {
-                    continue;
-                }
-                let ost = octx.stream(ost_index as _).unwrap();
-                packet.rescale_ts(ist_time_bases[ist_index], ost.time_base());
-                packet.set_position(-1);
-                packet.set_stream(ost_index as _);
-                packet.write_interleaved(&mut octx).unwrap();
             }
         }
         sleep(Duration::new(5, 0));
