@@ -1,5 +1,3 @@
 # streamyfin-optimization-server-rust
 
-- Extra Arch Packages
-NASM
-zip
+A rewrite of the streamyfin optimization server in rust.
