@@ -1,0 +1,33 @@
+[package]
+name = "streamyfin-optimization-server-rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+thiserror = "1.0.*"
+tracing = "0.1.*"
+regex = "1.11.*"
+rand = "0.8.*"
+tempfile = "3.13.*"
+serde = "1.0.*"
+serde_derive = "1.0.*"
+
+
+[dependencies.axum]
+version = "0.7.*"
+features = ["json"]
+
+[dependencies.ffmpeg-next]
+version = "7.1.0"
+
+[dependencies.tracing-subscriber]
+version = "0.3.*"
+features = ["env-filter"]
+
+[dependencies.chrono]
+version = "0.4.*"
+features = ["clock"]
+
+[dependencies.tokio]
+features = ["tracing", "rt-multi-thread"]
+version = "1.40.*"
