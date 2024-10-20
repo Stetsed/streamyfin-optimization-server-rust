@@ -19,7 +19,6 @@ features = ["json"]
 
 [dependencies.rsmpeg]
 version = "0.15.1"
-features = ["link_system_ffmpeg"]
 
 [dependencies.tracing-subscriber]
 version = "0.3.*"
@@ -36,3 +35,13 @@ version = "1.40.*"
 [dependencies.tower-http]
 version = "0.6.*"
 features = ["fs"]
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+
+[package.metadata.vcpkg]
+dependencies = ["ffmpeg"]
+git = "https://github.com/microsoft/vcpkg"
+rev = "d567b66"

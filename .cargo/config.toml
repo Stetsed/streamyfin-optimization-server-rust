@@ -1,0 +1,2 @@
+[env]
+FFMPEG_PKG_CONFIG_PATH = { value = "target/vcpkg/installed/x64-linux/lib/pkgconfig", relative = true }
