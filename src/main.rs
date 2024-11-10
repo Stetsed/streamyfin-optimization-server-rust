@@ -197,12 +197,16 @@ async fn get_file(body: Request, queue: Arc<Mutex<HashMap<u32, Mutex<Job>>>>) ->
             Some(o) => {
                 let job = o.lock().await.clone();
 
-                let request = Request::new(Body::empty());
+                if job.status == JobStatus::Completed {
+                    let request = Request::new(Body::empty());
 
-                Ok(ServeFile::new(job.output_path)
-                    .try_call(request)
-                    .await
-                    .unwrap())
+                    Ok(ServeFile::new(job.output_path)
+                        .try_call(request)
+                        .await
+                        .unwrap())
+                } else {
+                    Err(StatusCode::BAD_REQUEST)
+                }
             }
             None => Err(StatusCode::NOT_FOUND),
         }

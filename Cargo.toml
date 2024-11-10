@@ -1,47 +1,54 @@
 [package]
 name = "streamyfin-optimization-server-rust"
-version = "0.1.0"
 edition = "2021"
-
-[dependencies]
-thiserror = "1.0.*"
-anyhow = "1.0.90"
-tracing = "0.1.*"
-regex = "1.11.*"
-rand = "0.8.*"
-serde = "1.0.*"
-serde_derive = "1.0.*"
-cstr = "0.2.*"
-
-[dependencies.axum]
-version = "0.7.*"
-features = ["json"]
-
-[dependencies.rsmpeg]
-version = "0.15.1"
-
-[dependencies.tracing-subscriber]
-version = "0.3.*"
-features = ["env-filter"]
-
-[dependencies.chrono]
-version = "0.4.*"
-features = ["clock", "serde"]
-
-[dependencies.tokio]
-features = ["tracing", "rt-multi-thread", "fs", "io-util", "tokio-macros"]
-version = "1.40.*"
-
-[dependencies.tower-http]
-version = "0.6.*"
-features = ["fs"]
-
-[profile.release]
-strip = true
-lto = true
-codegen-units = 1
+version = "0.1.0"
 
 [package.metadata.vcpkg]
 dependencies = ["ffmpeg"]
 git = "https://github.com/microsoft/vcpkg"
 rev = "d567b66"
+
+[dependencies]
+anyhow = "1.0.90"
+cstr = "0.2.*"
+rand = "0.8.*"
+regex = "1.11.*"
+serde = "1.0.*"
+serde_derive = "1.0.*"
+thiserror = "1.0.*"
+
+[dependencies.axum]
+version = "0.7.*"
+features = ["json"]
+
+[dependencies.chrono]
+version = "0.4.*"
+features = ["clock", "serde"]
+
+[dependencies.rsmpeg]
+version = "0.15.1"
+features = []
+
+[dependencies.tokio]
+version = "1.40.*"
+features = ["tracing", "rt-multi-thread", "fs", "io-util", "tokio-macros"]
+
+[dependencies.tower-http]
+version = "0.6.*"
+features = ["fs"]
+
+[dependencies.tracing]
+version = "0.1.*"
+features = ["std"]
+default-features = false
+
+[dependencies.tracing-subscriber]
+version = "0.3.*"
+features = ["env-filter"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.release.package]
